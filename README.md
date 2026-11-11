@@ -67,6 +67,26 @@ session 129184-1794405601928630601
 
 沙箱内部：PID namespace 里只有沙箱自己的进程，`/proc/<host-pid>/root` 不可见。
 
+## 开发
+
+```bash
+cargo build --release
+./target/release/gitjail run --project ~/code/proj -- bash
+```
+
+依赖只有 `libc`、`clap`、`anyhow`——没有理由为了"零依赖"去手写 syscall 封装。
+
+如果 `cargo` 卡在 `static.crates.io`（国内常见，索引能通但下载超时），配置镜像：
+
+```toml
+# ~/.cargo/config.toml
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+```
+
 ## 不做什么
 
 - 不是 agent 的插件，不是某个 agent 的功能
