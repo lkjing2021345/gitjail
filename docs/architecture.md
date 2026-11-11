@@ -29,7 +29,7 @@
 gitjail run -- codex
 
 # 内部只做三步，然后 exec：
-unshare(CLONE_NEWNS | CLONE_NEWUSER)        # 1. 新挂载命名空间
+unshare(CLONE_NEWNS | CLONE_NEWUSER | CLONE_NEWPID)  # 1. 挂载 + PID 命名空间
 mount --bind -o ro / /                      # 2. 根只读
 mount -t overlay ... /home/niko/code/proj   # 3. 目标路径换成 overlay
 exec codex
@@ -39,6 +39,11 @@ exec codex
 `/home/niko/code/proj` 指向 overlay，于是写进 upper。
 
 内核不知道调用者是 codex、bash，还是 `curl | sh` 下来的脚本。
+
+> **PID namespace 不是可选项。** 只有 mount namespace 时，
+> `/proc/<另一个进程>/root/...` 会按**对方的**挂载表解析，直接绕过 RO bind。
+> 本机靠 `yama.ptrace_scope=1` 侥幸挡住了，但不能依赖它。
+> 详见 [spike.md §5](spike.md)。
 
 ### 2.2 同一路径，两个世界
 
@@ -71,6 +76,7 @@ VS Code 不受影响，不是因为它「通过了检查」，而是**它没走�
 
 - `fork` / `exec` 继承 namespace
 - `setns` 回父 namespace 需要目标 userns 的 `CAP_SYS_ADMIN`，它没有
+- 有 PID namespace，`/proc/<host-pid>/root` 这条经典逃逸路径也不存在
 - 最根本的：**真实树的可写路径在它的挂载表里根本不存在**
 
 ---
@@ -91,6 +97,14 @@ VS Code 不受影响，不是因为它「通过了检查」，而是**它没走�
 ```
 
 两个平面解耦是架构上最值钱的决定：**强制平面可以换，记录平面不变。**
+
+### 3.0 一个特权组件
+
+fanotify 的权限检查针对 **init user namespace**，普通用户和在 userns 里都拿不到
+（实测 `EPERM`，见 [spike.md §4](spike.md)）。
+
+所以 `gitjaild` 必须以 root 或 `CAP_SYS_ADMIN` 运行。CLI 不能自己监听，
+必须通过 unix socket 问 daemon。这是安装流程里唯一需要特权的部分，需要单独审计。
 
 ### 3.1 为什么用 overlay 而不是 FUSE
 

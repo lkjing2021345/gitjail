@@ -60,6 +60,7 @@ $ gitjail undo c3f3
 | [docs/policy.md](docs/policy.md) | 路径 / 操作 / 进程三层策略，敏感文件夹怎么定义 |
 | [docs/non-goals.md](docs/non-goals.md) | 已知边界，以及为什么它们是边界 |
 | [docs/faq.md](docs/faq.md) | inode 是什么、会不会拦住 Obsidian、IDE 插件怎么办 |
+| [docs/spike.md](docs/spike.md) | 四个关键假设的实测结果 |
 
 ## 状态
 
