@@ -103,8 +103,24 @@ int main(int argc, char **argv) {
         const char *what = (m->mask & FAN_CREATE) ? "CREATE" :
                            (m->mask & FAN_DELETE) ? "DELETE" :
                            (m->mask & FAN_CLOSE_WRITE) ? "CLOSE_WRITE" : "OTHER";
-        if (mode == 0 || mode == 1) show(what, -1, m->fd);
-        else                        show(what, m->pid, -1);
+
+        // pidfd 在 info record 里，不在 metadata.fd
+        int pidfd = -1;
+        char *p = (char *)m + m->metadata_len;
+        char *end = (char *)m + m->event_len;
+        while (p + sizeof(struct fanotify_event_info_header) <= end) {
+            struct fanotify_event_info_header *h = (void *)p;
+            if (h->len < sizeof(*h) || p + h->len > end) break;
+            if (h->info_type == FAN_EVENT_INFO_TYPE_PIDFD) {
+                struct fanotify_event_info_pidfd *pd = (void *)p;
+                pidfd = pd->pidfd;
+            }
+            p += h->len;
+        }
+
+        if (pidfd >= 0)      show(what, -1, pidfd);
+        else if (m->pid > 0) show(what, m->pid, -1);
+        else                 printf("  %-10s pid 未知 (metadata.fd=%d)\n", what, m->fd);
         m = FAN_EVENT_NEXT(m, len);
     }
     return 0;

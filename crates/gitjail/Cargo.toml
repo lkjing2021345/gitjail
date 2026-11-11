@@ -1,0 +1,8 @@
+[package]
+name = "gitjail"
+version = "0.1.0"
+edition = "2021"
+description = "OS-level write barrier for AI agents"
+license = "MIT"
+
+[dependencies]

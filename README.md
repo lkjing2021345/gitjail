@@ -45,6 +45,28 @@ c3f3  codex  14:02:31  bash    rm -rf tests/fixtures  (3 files)
 $ gitjail undo c3f3
 ```
 
+## 快速开始
+
+需要：Linux 5.12+（`mount_setattr`）、开启非特权 user namespace、**不要用 root 跑**。
+
+```bash
+cargo build --release --offline
+./target/release/gitjail run --project ~/code/proj -- bash
+```
+
+沙箱里 `rm`、写文件、`mv` 都和平常一样工作，但真实的 `~/code/proj`
+一个字节都不会变。退出后打印本次变更：
+
+```
+session 129184-1794405601928630601
+  A new.txt
+  D old.txt
+  M src/main.rs
+  upper: /run/user/1000/gitjail/129184-.../upper
+```
+
+沙箱内部：PID namespace 里只有沙箱自己的进程，`/proc/<host-pid>/root` 不可见。
+
 ## 不做什么
 
 - 不是 agent 的插件，不是某个 agent 的功能
@@ -64,7 +86,8 @@ $ gitjail undo c3f3
 
 ## 状态
 
-设计阶段。代码未开始。
+**MVP 可用**：`gitjail run`（userns + RO bind + overlay + pidns）已跑通。
+`protect` / `undo` / `audit` 尚未实现。
 
 ## License
 

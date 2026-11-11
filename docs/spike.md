@@ -122,6 +122,10 @@ sudo ./spike/fanotify_test
 # 期望看到 pidfd → /proc/<pid>/ns/mnt
 ```
 
+> **实现细节**：pidfd 不在 `fanotify_event_metadata.fd` 里，而是在
+> `FAN_EVENT_INFO_TYPE_PIDFD` 类型的 info record 里（`metadata_len` 之后）。
+> 第一版解析错了，导致打印 "pid 未知"，已修正。
+
 ---
 
 ## 5. 意外发现：`/proc/<pid>/root` 是逃生口
