@@ -11,12 +11,9 @@
 
 use anyhow::{Context, Result};
 use std::ffi::{CString, OsStr};
-use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 /// mount_setattr(2) 的参数
 #[repr(C)]
@@ -29,12 +26,8 @@ struct MountAttr {
 
 const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
 
-pub fn run(project: &Path, cmd: &[String]) -> Result<i32> {
-    let base = runtime_base().join(session_id());
-    fs::create_dir_all(base.join("upper"))?;
-    fs::create_dir_all(base.join("work"))?;
-    fs::create_dir_all(base.join("merged"))?;
-
+pub fn run(project: &Path, cmd: &[String], session_dir: &Path) -> Result<i32> {
+    let base = session_dir.to_path_buf();
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
@@ -57,10 +50,7 @@ pub fn run(project: &Path, cmd: &[String]) -> Result<i32> {
     if unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
         return Err(io::Error::last_os_error()).context("waitpid");
     }
-    let code = exit_code(status);
-
-    report(&base, project)?;
-    Ok(code)
+    Ok(exit_code(status))
 }
 
 fn child_main(project: &Path, cmd: &[String], base: &Path, uid: u32, gid: u32) -> Result<i32> {
@@ -83,13 +73,7 @@ fn child_main(project: &Path, cmd: &[String], base: &Path, uid: u32, gid: u32) -
         return Err(io::Error::last_os_error()).context("fork");
     }
     if pid == 0 {
-        if let Err(e) = mnt(
-            Path::new("proc"),
-            Path::new("/proc"),
-            Some("proc"),
-            0,
-            None,
-        ) {
+        if let Err(e) = mnt(Path::new("proc"), Path::new("/proc"), Some("proc"), 0, None) {
             eprintln!("gitjail: mount /proc: {e:#}");
             unsafe { libc::_exit(1) };
         }
@@ -107,11 +91,9 @@ fn child_main(project: &Path, cmd: &[String], base: &Path, uid: u32, gid: u32) -
 
 fn write_maps(uid: u32, gid: u32) -> Result<()> {
     // setgroups 在部分内核上不存在，失败可忽略
-    let _ = fs::write("/proc/self/setgroups", b"deny");
-    fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))
-        .context("写 uid_map")?;
-    fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))
-        .context("写 gid_map")?;
+    let _ = std::fs::write("/proc/self/setgroups", b"deny");
+    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).context("写 uid_map")?;
+    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).context("写 gid_map")?;
     Ok(())
 }
 
@@ -139,7 +121,13 @@ fn setup_mounts(project: &Path, base: &Path) -> Result<()> {
         base.join("upper").display(),
         base.join("work").display()
     );
-    mnt(Path::new("overlay"), &merged, Some("overlay"), 0, Some(&opts))?;
+    mnt(
+        Path::new("overlay"),
+        &merged,
+        Some("overlay"),
+        0,
+        Some(&opts),
+    )?;
 
     // 4. 合并视图挂回原路径：agent 看到的路径不变
     mnt(&merged, project, None, libc::MS_BIND, None)?;
@@ -209,77 +197,8 @@ fn exec(cmd: &[String]) -> ! {
     let mut ptrs: Vec<*const libc::c_char> = c.iter().map(|s| s.as_ptr()).collect();
     ptrs.push(std::ptr::null());
     unsafe { libc::execvp(c[0].as_ptr(), ptrs.as_ptr()) };
-    eprintln!(
-        "gitjail: exec {}: {}",
-        cmd[0],
-        io::Error::last_os_error()
-    );
+    eprintln!("gitjail: exec {}: {}", cmd[0], io::Error::last_os_error());
     unsafe { libc::_exit(127) }
-}
-
-// ---- 会话结束后：把 upper 层翻译成人能看的变更列表 ----------------------
-
-fn report(base: &Path, project: &Path) -> Result<()> {
-    let upper = base.join("upper");
-    let mut rows: Vec<(char, String)> = Vec::new();
-    walk(&upper, &upper, project, &mut rows)?;
-    rows.sort_by(|a, b| a.1.cmp(&b.1));
-
-    println!();
-    println!("session {}", base.file_name().unwrap().to_string_lossy());
-    if rows.is_empty() {
-        println!("  (no changes)");
-    }
-    for (k, rel) in rows {
-        println!("  {k} {rel}");
-    }
-    println!("  upper: {}", upper.display());
-    Ok(())
-}
-
-fn walk(root: &Path, dir: &Path, project: &Path, out: &mut Vec<(char, String)>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let md = fs::symlink_metadata(&path)?;
-        let ft = md.file_type();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
-        if ft.is_char_device() && md.rdev() == 0 {
-            out.push(('D', rel)); // whiteout
-        } else if ft.is_dir() {
-            walk(root, &path, project, out)?;
-        } else if ft.is_symlink() {
-            out.push(('L', rel));
-        } else if ft.is_file() {
-            let kind = if project.join(&rel).exists() { 'M' } else { 'A' };
-            out.push((kind, rel));
-        }
-    }
-    Ok(())
-}
-
-// ---- 杂项 ----------------------------------------------------------------
-
-fn runtime_base() -> PathBuf {
-    if let Ok(x) = std::env::var("XDG_RUNTIME_DIR") {
-        if !x.is_empty() {
-            return PathBuf::from(x).join("gitjail");
-        }
-    }
-    PathBuf::from(format!("/tmp/gitjail-{}", unsafe { libc::getuid() }))
-}
-
-fn session_id() -> String {
-    let ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{}", std::process::id(), ns)
 }
 
 fn exit_code(status: i32) -> i32 {

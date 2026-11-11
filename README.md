@@ -30,39 +30,51 @@ OS 层的写屏障。任何 agent —— Codex、OpenClaw、明天的无名 agen
 ## 一个例子
 
 ```bash
-$ gitjail run -- codex
+$ gitjail run --project ~/code/proj -- codex
 
-# codex 在笼子里：
-agent$ rm -rf src            # 记录，可撤销
-agent$ echo hi > src/a.txt   # 落到 upper，随后成为一次 commit
+session 138001-1794406523599844481
+  A new.txt
+  D old.txt
+  M src/main.rs
 
-# 你在外面：
-$ gitjail log
-c3f1  codex  14:02:11  write   src/a.txt
-c3f2  codex  14:02:19  delete  src/old.rs
-c3f3  codex  14:02:31  bash    rm -rf tests/fixtures  (3 files)
-
-$ gitjail undo c3f3
+  next: gitjail apply 138001-1794406523599844481
 ```
+
+此时**真实目录还没变**。agent 的所有改动都在 `upper/` 里，等你看过再决定：
+
+```bash
+$ gitjail log
+ID                       STATUS      CHANGES  PROJECT
+138001-179440652359984  pending           3  /home/niko/code/proj
+
+$ gitjail apply 138001-179440652359984
+applied 138001-179440652359984
+
+$ gitjail undo 138001-179440652359984
+undone 138001-179440652359984
+```
+
+`apply` 之前会先保存 pre-image，所以 `undo` 能精确还原——包括被删掉的文件。
+
+如果文件在会话结束后被你手动改过，`apply` 会整体拒绝，一个字节都不动；
+确认要覆盖时加 `--force`。
 
 ## 快速开始
 
 需要：Linux 5.12+（`mount_setattr`）、开启非特权 user namespace、**不要用 root 跑**。
 
 ```bash
-cargo build --release --offline
+cargo build --release
+
+# 1. 在沙箱里跑
 ./target/release/gitjail run --project ~/code/proj -- bash
-```
 
-沙箱里 `rm`、写文件、`mv` 都和平常一样工作，但真实的 `~/code/proj`
-一个字节都不会变。退出后打印本次变更：
+# 2. 看会话
+./target/release/gitjail log
 
-```
-session 129184-1794405601928630601
-  A new.txt
-  D old.txt
-  M src/main.rs
-  upper: /run/user/1000/gitjail/129184-.../upper
+# 3. 落到真实目录 / 撤销
+./target/release/gitjail apply
+./target/release/gitjail undo
 ```
 
 沙箱内部：PID namespace 里只有沙箱自己的进程，`/proc/<host-pid>/root` 不可见。
@@ -106,8 +118,10 @@ registry = "sparse+https://rsproxy.cn/index/"
 
 ## 状态
 
-**MVP 可用**：`gitjail run`（userns + RO bind + overlay + pidns）已跑通。
-`protect` / `undo` / `audit` 尚未实现。
+- `run`：沙箱（userns + RO bind + overlay + pidns）✅
+- `log` / `apply` / `undo`：基于 pre-image 的精确回滚 ✅
+- git 提交历史：未接入（数据模型已按 pre/post 树设计）
+- `protect` / `audit` / daemon：未实现
 
 ## License
 
