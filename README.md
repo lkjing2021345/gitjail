@@ -27,6 +27,39 @@ OS 层的写屏障。任何 agent —— Codex、OpenClaw、明天的无名 agen
 3. **只保护声明过的目录。** 默认一个都不保护。Obsidian、微信、浏览器、
    `~/.cache`、`/tmp` 全部照旧。
 
+## 保护声明
+
+默认什么都不保护。先声明：
+
+```bash
+$ gitjail protect ~/code/proj
+protected /home/niko/code/proj
+policy: /home/niko/.config/gitjail/policy.toml
+
+$ gitjail policy
+/home/niko/code/proj
+```
+
+没声明的目录，`run` 会直接拒绝——它不会假装保护你：
+
+```
+Error: /home/niko/code/proj 没有被 protect
+
+先声明：gitjail protect /home/niko/code/proj
+或者只在沙箱里跑、不要保护声明：gitjail run --unprotected ...
+```
+
+保护父目录会覆盖子目录：`protect ~/code` 之后 `~/code/proj` 也在范围内，
+overlay 的根会提升到 `~/code`。同时声明多个目录时，除了本次会话的根，
+其余目录在沙箱里一律只读。
+
+`unprotect` 必须显式确认，并且在沙箱内调用会被拒绝：
+
+```bash
+$ gitjail unprotect ~/code/proj --yes
+unprotected /home/niko/code/proj
+```
+
 ## 一个例子
 
 ```bash
@@ -87,13 +120,16 @@ pre-image 能逐字节还原。git 负责"看历史"，pre-image 负责"精确�
 ```bash
 cargo build --release
 
-# 1. 在沙箱里跑
+# 1. 声明保护
+./target/release/gitjail protect ~/code/proj
+
+# 2. 在沙箱里跑
 ./target/release/gitjail run --project ~/code/proj -- bash
 
-# 2. 看会话
+# 3. 看会话
 ./target/release/gitjail log
 
-# 3. 落到真实目录 / 撤销
+# 4. 落到真实目录 / 撤销
 ./target/release/gitjail apply
 ./target/release/gitjail undo
 ```
@@ -139,10 +175,11 @@ registry = "sparse+https://rsproxy.cn/index/"
 
 ## 状态
 
-- `run`：沙箱（userns + RO bind + overlay + pidns）✅
+- `protect` / `unprotect` / `policy`：声明式保护区 ✅
+- `run`：沙箱（userns + RO bind + overlay + pidns），未声明目录默认拒绝 ✅
 - `log` / `apply` / `undo`：基于 pre-image 的精确回滚 ✅
 - git 历史：`apply` 产生 pre/post commit，`show` 可查看 ✅
-- `protect` / `audit` / daemon：未实现
+- `audit` / 特权 daemon：未实现
 
 ## License
 

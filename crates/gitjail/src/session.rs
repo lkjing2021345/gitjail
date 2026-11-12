@@ -21,6 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Meta {
     pub id: String,
     pub project: PathBuf,
+    /// overlay 的 lower 根。保护 ~/code 而项目在 ~/code/proj 时，root 是 ~/code
+    #[serde(default)]
+    pub root: Option<PathBuf>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
     pub applied_at: Option<u64>,
@@ -47,7 +50,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn create(project: &Path, command: &[String]) -> Result<Session> {
+    pub fn create(project: &Path, root: &Path, command: &[String]) -> Result<Session> {
         let id = format!("{}-{}", std::process::id(), now_nanos());
         let dir = sessions_root().join(&id);
         fs::create_dir_all(dir.join("upper"))?;
@@ -57,6 +60,7 @@ impl Session {
         let meta = Meta {
             id: id.clone(),
             project: project.to_path_buf(),
+            root: Some(root.to_path_buf()),
             started_at: now_ns(),
             finished_at: None,
             applied_at: None,
@@ -120,8 +124,9 @@ impl Session {
     /// 沙箱退出后调用：把 upper 层翻译成变更列表并落盘
     pub fn finish(&mut self) -> Result<()> {
         let upper = self.dir.join("upper");
+        let root = self.root().to_path_buf();
         let mut out = Vec::new();
-        walk(&upper, &upper, &self.meta.project, &mut out)?;
+        walk(&upper, &upper, &root, &mut out)?;
         out.sort_by(|a, b| a.path.cmp(&b.path));
 
         fs::write(
@@ -131,7 +136,22 @@ impl Session {
         self.changes = out;
         self.meta.finished_at = Some(now_ns());
         self.save_meta()?;
+        self.cleanup();
         Ok(())
+    }
+
+    /// overlay 的 workdir 会留下一个 mode 000 的 work/work，顺手清掉
+    fn cleanup(&self) {
+        let _ = fs::remove_dir_all(self.dir.join("merged"));
+        let work = self.dir.join("work");
+        let inner = work.join("work");
+        if let Ok(md) = fs::symlink_metadata(&inner) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = md.permissions();
+            perm.set_mode(0o700);
+            let _ = fs::set_permissions(&inner, perm);
+        }
+        let _ = fs::remove_dir_all(&work);
     }
 
     /// 把会话的改动落到真实目录，同时保存 pre-image
@@ -146,12 +166,13 @@ impl Session {
         let finished = self.meta.finished_at.unwrap_or_else(now_ns);
         let pre_root = self.dir.join("pre");
         let upper = self.dir.join("upper");
+        let root = self.root().to_path_buf();
 
         // 先做完整冲突检查，任何一个冲突都不动文件。
         // 否则部分 apply 会让 pre-image 与真实状态错位，undo 就不准了。
         let mut conflicts: Vec<&str> = Vec::new();
         for ch in &self.changes {
-            let dst = self.meta.project.join(&ch.path);
+            let dst = root.join(&ch.path);
             let hit = match ch.kind {
                 'A' => exists(&dst),
                 _ => is_newer_than(&dst, finished),
@@ -171,7 +192,7 @@ impl Session {
         }
 
         // 记录 pre 状态。只 add 会话涉及的路径，避免把整个仓库卷进来。
-        let shadow = match crate::shadow::Shadow::open(&self.meta.project) {
+        let shadow = match crate::shadow::Shadow::open(self.root()) {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("  ! 跳过 git 记录: {e:#}");
@@ -183,7 +204,7 @@ impl Session {
             .iter()
             .filter(|c| c.kind != 'A' && trackable(&c.path))
             .map(|c| c.path.clone())
-            .filter(|p| exists(&self.meta.project.join(p)))
+            .filter(|p| exists(&root.join(p)))
             .collect();
         let pre_commit = match &shadow {
             Some(sh) => sh
@@ -199,7 +220,7 @@ impl Session {
         };
 
         for ch in &self.changes {
-            let dst = self.meta.project.join(&ch.path);
+            let dst = root.join(&ch.path);
             let src = upper.join(&ch.path);
 
             match ch.kind {
@@ -270,11 +291,12 @@ impl Session {
         }
         let applied_at = self.meta.applied_at.unwrap_or_else(now_ns);
         let pre_root = self.dir.join("pre");
+        let root = self.root().to_path_buf();
 
         // 同样先检查：apply 之后被改过的文件不回滚
         let mut conflicts: Vec<&str> = Vec::new();
         for ch in &self.changes {
-            let dst = self.meta.project.join(&ch.path);
+            let dst = root.join(&ch.path);
             if exists(&dst) && is_newer_than(&dst, applied_at) {
                 conflicts.push(&ch.path);
             }
@@ -290,7 +312,7 @@ impl Session {
         }
 
         for ch in self.changes.iter().rev() {
-            let dst = self.meta.project.join(&ch.path);
+            let dst = root.join(&ch.path);
             let pre = pre_root.join(&ch.path);
 
             if exists(&pre) {
@@ -305,6 +327,10 @@ impl Session {
         self.meta.undone = true;
         self.save_meta()?;
         Ok(())
+    }
+
+    pub fn root(&self) -> &Path {
+        self.meta.root.as_deref().unwrap_or(&self.meta.project)
     }
 
     pub fn status(&self) -> &'static str {

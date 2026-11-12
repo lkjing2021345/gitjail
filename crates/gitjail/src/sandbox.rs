@@ -3,9 +3,9 @@
 //! 顺序：
 //!   1. unshare(CLONE_NEWUSER)，写 uid_map / gid_map
 //!   2. unshare(CLONE_NEWNS | CLONE_NEWPID)
-//!   3. / 设为 private，项目目录 bind 成挂载点
-//!   4. mount_setattr 设为 per-mount 只读
-//!   5. overlay(lower=项目, upper=session) 挂到 staging
+//!   3. / 设为 private
+//!   4. 其余受保护根 bind 成只读
+//!   5. 本次会话的根 bind 成只读 + overlay
 //!   6. 合并视图 bind 回原路径（agent 看到的路径不变）
 //!   7. fork 出 pid 1，挂 /proc，exec 命令
 
@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use std::ffi::{CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// mount_setattr(2) 的参数
 #[repr(C)]
@@ -26,7 +26,13 @@ struct MountAttr {
 
 const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
 
-pub fn run(project: &Path, cmd: &[String], session_dir: &Path) -> Result<i32> {
+pub fn run(
+    project: &Path,
+    cmd: &[String],
+    session_dir: &Path,
+    root: &Path,
+    others: &[PathBuf],
+) -> Result<i32> {
     let base = session_dir.to_path_buf();
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
@@ -36,7 +42,7 @@ pub fn run(project: &Path, cmd: &[String], session_dir: &Path) -> Result<i32> {
         return Err(io::Error::last_os_error()).context("fork");
     }
     if pid == 0 {
-        let code = match child_main(project, cmd, &base, uid, gid) {
+        let code = match child_main(project, cmd, &base, root, others, uid, gid) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("gitjail: {e:#}");
@@ -53,7 +59,15 @@ pub fn run(project: &Path, cmd: &[String], session_dir: &Path) -> Result<i32> {
     Ok(exit_code(status))
 }
 
-fn child_main(project: &Path, cmd: &[String], base: &Path, uid: u32, gid: u32) -> Result<i32> {
+fn child_main(
+    project: &Path,
+    cmd: &[String],
+    base: &Path,
+    root: &Path,
+    others: &[PathBuf],
+    uid: u32,
+    gid: u32,
+) -> Result<i32> {
     // 必须分两步：先 userns，写好映射，再 mount/pid namespace。
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         return Err(io::Error::last_os_error())
@@ -65,7 +79,7 @@ fn child_main(project: &Path, cmd: &[String], base: &Path, uid: u32, gid: u32) -
         return Err(io::Error::last_os_error()).context("unshare(NS|PID)");
     }
 
-    setup_mounts(project, base)?;
+    setup_mounts(root, base, others)?;
 
     // CLONE_NEWPID 只影响之后 fork 的子进程
     let pid = unsafe { libc::fork() };
@@ -97,7 +111,7 @@ fn write_maps(uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
-fn setup_mounts(project: &Path, base: &Path) -> Result<()> {
+fn setup_mounts(root: &Path, base: &Path, others: &[PathBuf]) -> Result<()> {
     // 1. 挂载不传播到宿主
     mnt(
         Path::new("none"),
@@ -107,17 +121,22 @@ fn setup_mounts(project: &Path, base: &Path) -> Result<()> {
         None,
     )?;
 
-    // 2. 项目目录成为独立挂载点，然后只读。
+    // 2. 其余受保护目录：一律只读。
     //    不能用 mount(MS_REMOUNT|MS_BIND|MS_RDONLY)：MS_RDONLY 是 superblock
     //    标志，在 userns 里改会 EPERM。mount_setattr 是 per-mount 的。
-    mnt(project, project, None, libc::MS_BIND, None)?;
-    ro_mount(project)?;
+    for other in others {
+        mnt(other, other, None, libc::MS_BIND, None)?;
+        ro_mount(other)?;
+    }
 
-    // 3. overlay：lower = 只读项目，upper/work = 会话目录
+    // 3. 本次会话的根：只读 + overlay
+    mnt(root, root, None, libc::MS_BIND, None)?;
+    ro_mount(root)?;
+
     let merged = base.join("merged");
     let opts = format!(
         "lowerdir={},upperdir={},workdir={}",
-        project.display(),
+        root.display(),
         base.join("upper").display(),
         base.join("work").display()
     );
@@ -130,7 +149,7 @@ fn setup_mounts(project: &Path, base: &Path) -> Result<()> {
     )?;
 
     // 4. 合并视图挂回原路径：agent 看到的路径不变
-    mnt(&merged, project, None, libc::MS_BIND, None)?;
+    mnt(&merged, root, None, libc::MS_BIND, None)?;
     Ok(())
 }
 

@@ -15,16 +15,16 @@ use std::process::{Command, Stdio};
 
 pub struct Shadow {
     repo: PathBuf,
-    project: PathBuf,
+    work_tree: PathBuf,
 }
 
 impl Shadow {
     /// 打开已有仓库；不存在则创建
-    pub fn open(project: &Path) -> Result<Shadow> {
-        if let Some(s) = Self::existing(project) {
+    pub fn open(work_tree: &Path) -> Result<Shadow> {
+        if let Some(s) = Self::existing(work_tree) {
             return Ok(s);
         }
-        let repo = repo_path(project);
+        let repo = repo_path(work_tree);
         if let Some(parent) = repo.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -43,16 +43,16 @@ impl Shadow {
         }
         Ok(Shadow {
             repo,
-            project: project.to_path_buf(),
+            work_tree: work_tree.to_path_buf(),
         })
     }
 
-    pub fn existing(project: &Path) -> Option<Shadow> {
-        let repo = repo_path(project);
+    pub fn existing(work_tree: &Path) -> Option<Shadow> {
+        let repo = repo_path(work_tree);
         if repo.is_dir() {
             Some(Shadow {
                 repo,
-                project: project.to_path_buf(),
+                work_tree: work_tree.to_path_buf(),
             })
         } else {
             None
@@ -120,11 +120,11 @@ impl Shadow {
         let mut c = Command::new("git");
         let mut git_dir = OsString::from("--git-dir=");
         git_dir.push(&self.repo);
-        let mut work_tree = OsString::from("--work-tree=");
-        work_tree.push(&self.project);
+        let mut wt = OsString::from("--work-tree=");
+        wt.push(&self.work_tree);
 
         c.arg(git_dir)
-            .arg(work_tree)
+            .arg(wt)
             .arg("-c")
             .arg("core.bare=false")
             .env("GIT_AUTHOR_NAME", "gitjail")

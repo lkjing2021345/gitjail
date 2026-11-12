@@ -1,8 +1,9 @@
+mod policy;
 mod sandbox;
 mod session;
 mod shadow;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use session::Session;
 use std::path::PathBuf;
@@ -20,11 +21,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 声明一个受保护的项目目录
+    Protect {
+        /// 目录（会被 canonicalize 后写入策略）
+        path: PathBuf,
+    },
+
+    /// 取消保护
+    Unprotect {
+        path: PathBuf,
+
+        /// 必须显式确认
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// 列出受保护的目录
+    Policy,
+
     /// 在沙箱里运行一个命令
     Run {
-        /// 受保护的项目目录（默认当前目录）
+        /// 项目目录（默认当前目录）。必须已被 protect
         #[arg(long, short)]
         project: Option<PathBuf>,
+
+        /// 即使没有 protect 也运行（仅用于试用）
+        #[arg(long)]
+        unprotected: bool,
 
         /// 要执行的命令，放在 -- 之后
         #[arg(last = true, required = true)]
@@ -82,11 +105,79 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Run { project, command } => {
-            let project = canonical(project)?;
-            let mut s = Session::create(&project, &command)?;
+        Cmd::Protect { path } => {
+            policy::require_outside_sandbox()?;
+            let mut p = policy::Policy::load()?;
+            let added = p.protect(&path)?;
+            println!(
+                "{} {}",
+                if added {
+                    "protected"
+                } else {
+                    "already protected"
+                },
+                path.display()
+            );
+            println!("policy: {}", p.file().display());
+        }
 
-            let code = sandbox::run(&project, &command, &s.dir)?;
+        Cmd::Unprotect { path, yes } => {
+            policy::require_outside_sandbox()?;
+            if !yes {
+                bail!(
+                    "取消保护需要显式确认：gitjail unprotect {} --yes",
+                    path.display()
+                );
+            }
+            let mut p = policy::Policy::load()?;
+            let removed = p.unprotect(&path)?;
+            println!(
+                "{} {}",
+                if removed {
+                    "unprotected"
+                } else {
+                    "not protected"
+                },
+                path.display()
+            );
+        }
+
+        Cmd::Policy => {
+            let p = policy::Policy::load()?;
+            if p.paths.is_empty() {
+                println!("(no protected paths)");
+                println!("add one with: gitjail protect <path>");
+            } else {
+                for path in &p.paths {
+                    println!("{}", path.display());
+                }
+            }
+        }
+
+        Cmd::Run {
+            project,
+            unprotected,
+            command,
+        } => {
+            let project = canonical(project)?;
+            let p = policy::Policy::load()?;
+
+            let root = match p.covering_root(&project) {
+                Some(r) => r,
+                None if unprotected => project.clone(),
+                None => bail!(
+                    "{} 没有被 protect\n\n\
+                     先声明：gitjail protect {}\n\
+                     或者只在沙箱里跑、不要保护声明：gitjail run --unprotected ...",
+                    project.display(),
+                    project.display()
+                ),
+            };
+
+            let others = p.others(&root);
+            let mut s = Session::create(&project, &root, &command)?;
+
+            let code = sandbox::run(&project, &command, &s.dir, &root, &others)?;
             s.finish()?;
             print_session(&s, true);
             std::process::exit(code);
@@ -105,7 +196,7 @@ fn main() -> Result<()> {
 
             println!("{:<24} {:<11} {:>7}  PROJECT", "ID", "STATUS", "CHANGES");
             for m in list {
-                let opened = session::Session::open(&session::dir_of(&m.id)).ok();
+                let opened = Session::open(&session::dir_of(&m.id)).ok();
                 let count = opened.as_ref().map(|s| s.changes.len()).unwrap_or(0);
                 let status = opened.as_ref().map(|s| s.status()).unwrap_or("incomplete");
                 println!(
@@ -141,8 +232,8 @@ fn main() -> Result<()> {
                 .as_ref()
                 .or(s.meta.pre_commit.as_ref())
                 .with_context(|| format!("会话 {} 没有 git 历史（先 apply）", s.meta.id))?;
-            let shadow = shadow::Shadow::existing(&s.meta.project)
-                .with_context(|| format!("{} 还没有 shadow repo", s.meta.project.display()))?;
+            let shadow = shadow::Shadow::existing(s.root())
+                .with_context(|| format!("{} 还没有 shadow repo", s.root().display()))?;
             shadow.show(commit, patch)?;
         }
 
@@ -183,6 +274,7 @@ fn canonical(p: Option<PathBuf>) -> Result<PathBuf> {
 fn print_session(s: &Session, with_hint: bool) {
     println!();
     println!("session {}", s.meta.id);
+    println!("  root: {}", s.root().display());
     if s.changes.is_empty() {
         println!("  (no changes)");
         return;
