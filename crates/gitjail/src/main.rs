@@ -1,5 +1,6 @@
 mod sandbox;
 mod session;
+mod shadow;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -48,6 +49,19 @@ enum Cmd {
         /// 覆盖会话结束后被改过的文件
         #[arg(long)]
         force: bool,
+    },
+
+    /// 显示会话对应的 git 提交
+    Show {
+        /// 会话 id（默认：当前项目最近一次）
+        session: Option<String>,
+
+        #[arg(long, short)]
+        project: Option<PathBuf>,
+
+        /// 显示完整 diff
+        #[arg(long)]
+        patch: bool,
     },
 
     /// 撤销已经 apply 的会话
@@ -113,6 +127,23 @@ fn main() -> Result<()> {
             s.apply(force)?;
             println!("applied {}", s.meta.id);
             print_session(&s, false);
+        }
+
+        Cmd::Show {
+            session,
+            project,
+            patch,
+        } => {
+            let s = resolve(session, project)?;
+            let commit = s
+                .meta
+                .post_commit
+                .as_ref()
+                .or(s.meta.pre_commit.as_ref())
+                .with_context(|| format!("会话 {} 没有 git 历史（先 apply）", s.meta.id))?;
+            let shadow = shadow::Shadow::existing(&s.meta.project)
+                .with_context(|| format!("{} 还没有 shadow repo", s.meta.project.display()))?;
+            shadow.show(commit, patch)?;
         }
 
         Cmd::Undo {

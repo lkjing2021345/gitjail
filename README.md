@@ -59,6 +59,27 @@ undone 138001-179440652359984
 如果文件在会话结束后被你手动改过，`apply` 会整体拒绝，一个字节都不动；
 确认要覆盖时加 `--force`。
 
+## git 历史
+
+每次 `apply` 会在项目的 shadow repo 里产生两个 commit：
+
+```
+pre:   session <id>     ← apply 之前的工作树
+agent: <command>        ← apply 之后
+```
+
+仓库在 `~/.local/share/gitjail/repos/<hash>.git`，**不会碰项目自己的 `.git`**。
+shadow commit 只记录本次会话涉及的路径（并排除 `.git/`），所以不会把
+`node_modules` 卷进来。
+
+```bash
+$ gitjail show            # 最近一次会话的提交 + diffstat
+$ gitjail show --patch    # 完整 diff
+```
+
+注意：`undo` 仍然走 pre-image，而不是 `git revert`——因为 git 不保存权限位，
+pre-image 能逐字节还原。git 负责"看历史"，pre-image 负责"精确回滚"。
+
 ## 快速开始
 
 需要：Linux 5.12+（`mount_setattr`）、开启非特权 user namespace、**不要用 root 跑**。
@@ -120,7 +141,7 @@ registry = "sparse+https://rsproxy.cn/index/"
 
 - `run`：沙箱（userns + RO bind + overlay + pidns）✅
 - `log` / `apply` / `undo`：基于 pre-image 的精确回滚 ✅
-- git 提交历史：未接入（数据模型已按 pre/post 树设计）
+- git 历史：`apply` 产生 pre/post commit，`show` 可查看 ✅
 - `protect` / `audit` / daemon：未实现
 
 ## License

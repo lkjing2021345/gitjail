@@ -28,6 +28,10 @@ pub struct Meta {
     pub applied: bool,
     #[serde(default)]
     pub undone: bool,
+    #[serde(default)]
+    pub pre_commit: Option<String>,
+    #[serde(default)]
+    pub post_commit: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -59,6 +63,8 @@ impl Session {
             command: command.to_vec(),
             applied: false,
             undone: false,
+            pre_commit: None,
+            post_commit: None,
         };
         let s = Session {
             dir,
@@ -164,6 +170,34 @@ impl Session {
             );
         }
 
+        // 记录 pre 状态。只 add 会话涉及的路径，避免把整个仓库卷进来。
+        let shadow = match crate::shadow::Shadow::open(&self.meta.project) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("  ! 跳过 git 记录: {e:#}");
+                None
+            }
+        };
+        let pre_paths: Vec<String> = self
+            .changes
+            .iter()
+            .filter(|c| c.kind != 'A' && trackable(&c.path))
+            .map(|c| c.path.clone())
+            .filter(|p| exists(&self.meta.project.join(p)))
+            .collect();
+        let pre_commit = match &shadow {
+            Some(sh) => sh
+                .commit(
+                    &format!("pre: session {}\n\n{}", self.meta.id, self.command_line()),
+                    &pre_paths,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("  ! pre commit: {e:#}");
+                    None
+                }),
+            None => None,
+        };
+
         for ch in &self.changes {
             let dst = self.meta.project.join(&ch.path);
             let src = upper.join(&ch.path);
@@ -186,11 +220,47 @@ impl Session {
             }
         }
 
+        let all_paths: Vec<String> = self
+            .changes
+            .iter()
+            .filter(|c| trackable(&c.path))
+            .map(|c| c.path.clone())
+            .collect();
+        let post_commit = match &shadow {
+            Some(sh) => sh
+                .commit(&self.commit_message(), &all_paths)
+                .unwrap_or_else(|e| {
+                    eprintln!("  ! post commit: {e:#}");
+                    None
+                }),
+            None => None,
+        };
+
         self.meta.applied = true;
         self.meta.applied_at = Some(now_ns());
         self.meta.undone = false;
+        self.meta.pre_commit = pre_commit;
+        self.meta.post_commit = post_commit;
         self.save_meta()?;
         Ok(())
+    }
+
+    fn command_line(&self) -> String {
+        self.meta.command.join(" ")
+    }
+
+    fn commit_message(&self) -> String {
+        let cmd = self.command_line();
+        let short: String = if cmd.chars().count() > 60 {
+            format!("{}…", cmd.chars().take(60).collect::<String>())
+        } else {
+            cmd
+        };
+        let mut msg = format!("agent: {short}\n\nsession: {}\nchanges:\n", self.meta.id);
+        for c in &self.changes {
+            msg.push_str(&format!("  {} {}\n", c.kind, c.path));
+        }
+        msg
     }
 
     /// 撤销 apply：pre 里有就还原，没有（原本不存在）就删掉
@@ -281,6 +351,11 @@ pub fn dir_of(id: &str) -> PathBuf {
 
 // ---- 文件操作 ------------------------------------------------------------
 
+/// shadow repo 只记录工作树，不记录项目自己的 `.git`
+fn trackable(path: &str) -> bool {
+    path != ".git" && !path.starts_with(".git/") && !path.contains("/.git/")
+}
+
 fn exists(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok()
 }
@@ -370,7 +445,7 @@ fn sessions_root() -> PathBuf {
     data_root().join("sessions")
 }
 
-fn data_root() -> PathBuf {
+pub(crate) fn data_root() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
         if !x.is_empty() {
             return PathBuf::from(x).join("gitjail");
